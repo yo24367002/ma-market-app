@@ -1,6 +1,6 @@
 {
-  "name": "全球市场参谋",
-  "short_name": "市场参谋",
+  "name": "zg专用",
+  "short_name": "zg专用",
   "description": "每日全球市场数据 + AI 解读 + 风险评分 + SBI 持仓诊断",
   "lang": "zh-CN",
   "start_url": "./index.html",
