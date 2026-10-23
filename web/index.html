@@ -68,7 +68,20 @@
   <!-- 持仓 -->
   <section id="tab-portfolio" class="panel">
     <div class="card tip">
-      两种方式管理持仓：<br>① 从 SBI 复制持仓表格/CSV 粘贴到下方 → 「导入」<br>② 手动添加代码和数量
+      三种方式管理持仓：<br>① <b>📷 拍照/上传 SBI 持仓截图</b>，AI 自动识别持有基金和金额<br>② 从 SBI 复制持仓表格/CSV 粘贴 → 「导入 CSV」<br>③ 手动添加代码和数量
+    </div>
+    <div class="img-import">
+      <input type="file" id="p-img" accept="image/*" style="display:none" />
+      <button id="p-img-btn" class="btn-block cam-btn">📷 拍照 / 上传持仓截图</button>
+      <div class="hint">支持拍摄 SBI 手机端「保有資産一覧」或上传截图。识别结果请核对后再导入。</div>
+    </div>
+    <div id="img-status" class="img-status" style="display:none"></div>
+    <div id="img-result" class="card" style="display:none">
+      <div class="card-title">🤖 识别结果 <span class="ai-tag">请核对</span></div>
+      <div class="tip" id="img-total"></div>
+      <div id="img-rows"></div>
+      <button id="img-confirm" class="btn-block">确认导入勾选项</button>
+      <div class="hint">AI 识别偶有数字误差，导入前请核对每行的代码、数量、成本是否正确。</div>
     </div>
     <div class="add-row">
       <input id="p-code" placeholder="代码 例: SPY / 1346 / 7203.T" />
