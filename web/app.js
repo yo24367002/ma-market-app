@@ -1,47 +1,51 @@
-/* 全球市场参谋 - 前端逻辑 */
+/* 全球市场参谋 v2 - 前端逻辑：搜索 / 走势图 / AI 预测 / 收藏 / 持仓 */
 const $ = (id) => document.getElementById(id);
 const fmt = (n, d = 2) => (n === null || n === undefined || isNaN(n)) ? "—" : n.toFixed(d);
-const sign = (v) => v > 0 ? "+" + fmt(v) : fmt(v);
+const sign = (v) => (v === null || v === undefined || isNaN(v)) ? "—" : (v > 0 ? "+" + v.toFixed(2) : v.toFixed(2));
 
 let DATA = null;
 let USDJPY = 155;
+let chart = null;
+let currentSymbol = null;
+let currentRange = "1m";
 
 function fmtJPY(n) {
   if (n === null || n === undefined || isNaN(n)) return "—";
   return "¥" + Math.round(n).toLocaleString();
 }
 
-/* ---------- 轻量 markdown 渲染 ---------- */
 function md(text) {
   if (!text) return "";
-  let t = text
+  return text
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>");
-  const lines = t.split("\n").map(l => {
-    if (/^\s*[-*]\s/.test(l)) return l.replace(/^\s*[-*]\s/, "• ");
-    return l;
-  });
-  return lines.join("\n");
 }
 
-/* ---------- 风险徽章 ---------- */
 function badge(r) {
   const cls = !r || r.level === "数据不足" ? "" :
-    r.level === "低风险" ? "risk-low" :
-    r.level === "中风险" ? "risk-mid" :
+    r.level === "低风险" ? "risk-low" : r.level === "中风险" ? "risk-mid" :
     r.level === "中高风险" ? "risk-midhigh" : "risk-high";
   const txt = r ? r.level : "—";
   return `<span class="risk-badge ${cls}">${txt}</span>`;
 }
 
-/* ---------- 指数卡片 ---------- */
+function findItem(symbol) {
+  if (!DATA) return null;
+  for (const k of ["indexes", "etfs", "stocks", "japan", "fx", "commodities"]) {
+    const it = (DATA[k] || []).find(x => x.symbol === symbol);
+    if (it) return it;
+  }
+  return (DATA.watch || []).find(x => x.symbol === symbol) || null;
+}
+
+/* ========== 今日概览 ========== */
 function renderIndexes() {
   const grid = $("index-grid");
   grid.innerHTML = (DATA.indexes || []).map(it => {
     const c = it.chg1d_pct > 0 ? "up" : it.chg1d_pct < 0 ? "down" : "flat";
     const arrow = it.chg1d_pct > 0 ? "▲" : it.chg1d_pct < 0 ? "▼" : "—";
-    return `<div class="grid-card">
+    return `<div class="grid-card" data-s="${it.symbol}">
       <div class="nm">${it.name} <span style="opacity:.6">· ${it.region}</span></div>
       <div class="px">${fmt(it.price, 0)}</div>
       <div class="ch ${c}">${arrow} ${sign(it.chg1d_pct)}%</div>
@@ -49,6 +53,7 @@ function renderIndexes() {
     </div>`;
   }).join("");
   $("idx-time").textContent = DATA.generated_at ? "更新 " + DATA.generated_at : "";
+  grid.querySelectorAll(".grid-card").forEach(c => c.onclick = () => openDetail(c.dataset.s));
 }
 
 function renderFX() {
@@ -56,64 +61,273 @@ function renderFX() {
   const items = [...(DATA.fx || []), ...(DATA.commodities || [])];
   grid.innerHTML = items.map(it => {
     const c = it.chg1d_pct > 0 ? "up" : it.chg1d_pct < 0 ? "down" : "flat";
-    return `<div class="grid-card">
+    return `<div class="grid-card" data-s="${it.symbol}">
       <div class="nm">${it.name}</div>
       <div class="px">${fmt(it.price)}</div>
       <div class="ch ${c}">${sign(it.chg1d_pct)}%</div>
     </div>`;
   }).join("");
+  grid.querySelectorAll(".grid-card").forEach(c => c.onclick = () => openDetail(c.dataset.s));
 }
 
-/* ---------- AI 解读 ---------- */
 function renderAI() {
-  const box = $("ai-text");
   const ai = DATA.ai;
-  if (!ai || !ai.text) { box.textContent = "（AI 解读暂未生成）"; return; }
-  box.innerHTML = md(ai.text);
+  if (!ai) { $("ai-text").textContent = "（AI 解读暂未生成）"; return; }
+  let h = "";
+  if (ai.environment) {
+    h += `<div class="ai-env">${md(ai.environment)}</div>`;
+  }
+  if (ai.focus && ai.focus.length) {
+    h += `<div class="ai-focus-title">🎯 今日关注</div>`;
+    ai.focus.forEach(f => {
+      const it = findItem(f.symbol);
+      h += `<div class="ai-focus" data-s="${f.symbol}">
+        <div class="ai-focus-head"><b>${f.name || f.symbol}</b> <span class="chg">${it ? sign(it.chg1d_pct) + "%" : ""}</span></div>
+        <div class="hint">${md(f.why || "")}</div>
+        <div class="hint" style="color:#f76b15">⚠ ${md(f.risk || "")}</div>
+      </div>`;
+    });
+  }
+  if (ai.advice) h += `<div class="ai-advice">💡 <b>操作思路</b><br>${md(ai.advice)}</div>`;
+  if (ai.disclaimer) h += `<div class="hint ai-disc">${md(ai.disclaimer)}</div>`;
+  $("ai-text").innerHTML = h || "（AI 解读暂未生成）";
+  document.querySelectorAll(".ai-focus").forEach(el => el.onclick = () => openDetail(el.dataset.s));
 }
 
-/* ---------- 关注列表 ---------- */
+/* ========== 关注列表 ========== */
+function metricsHtml(it) {
+  const m = [];
+  if (it.rsi14 !== null && it.rsi14 !== undefined) m.push(`RSI <b>${fmt(it.rsi14, 0)}</b>`);
+  if (it.vol20_annual_pct) m.push(`波动率 <b>${fmt(it.vol20_annual_pct, 0)}%</b>`);
+  if (it.pct52w !== undefined) m.push(`52周位置 <b>${fmt(it.pct52w, 0)}%</b>`);
+  if (it.pe) m.push(`PE <b>${fmt(it.pe, 1)}</b>`);
+  if (it.trend === 2) m.push("趋势 <b>强势</b>");
+  else if (it.trend === 0) m.push("趋势 <b>偏弱</b>");
+  else m.push("趋势 <b>中性</b>");
+  const p = it.prediction || {};
+  const ai = p.ai || {};
+  if (ai.direction) m.push(`AI预测 <b>${ai.direction}</b>${p.confidence ? " " + p.confidence + "%" : ""}`);
+  return m.join('<span class="metric">·</span>');
+}
+
 function watchItem(it) {
   const c = it.chg1d_pct > 0 ? "up" : it.chg1d_pct < 0 ? "down" : "flat";
-  const metrics = [];
-  if (it.rsi14 !== null && it.rsi14 !== undefined) metrics.push(`RSI <b>${fmt(it.rsi14, 0)}</b>`);
-  if (it.vol20_annual_pct) metrics.push(`波动率 <b>${fmt(it.vol20_annual_pct, 0)}%</b>`);
-  if (it.pct52w !== undefined) metrics.push(`52周位置 <b>${fmt(it.pct52w, 0)}%</b>`);
-  if (it.pe) metrics.push(`PE <b>${fmt(it.pe, 1)}</b>`);
-  if (it.trend === 2) metrics.push("趋势 <b>强势</b>");
-  else if (it.trend === 0) metrics.push("趋势 <b>偏弱</b>");
-  else metrics.push("趋势 <b>中性</b>");
-  return `<div class="item">
+  return `<div class="item" data-s="${it.symbol}">
     <div class="item-head">
       <div>
         <div class="item-name">${it.name} <span class="${c}">(${sign(it.chg1d_pct)}%)</span></div>
-        <div class="item-sub">${it.symbol} · ${fmt(it.price)} USD${it.region ? " · " + it.region : ""}</div>
+        <div class="item-sub">${it.symbol} · ${fmt(it.price)} ${it.region ? "· " + it.region : ""}</div>
       </div>
       ${badge(it.risk)}
     </div>
-    <div class="item-metrics">${metrics.join('<span class="metric">·</span>').replaceAll('<span class="metric">·</span><span class="metric">·</span>', '<span class="metric">·</span>')}</div>
+    <div class="item-metrics">${metricsHtml(it)}</div>
   </div>`;
 }
 
 function renderWatch() {
   const etfs = (DATA.etfs || []).slice().sort((a, b) => (a.risk.score || 99) - (b.risk.score || 99));
   const stocks = (DATA.stocks || []).slice().sort((a, b) => (a.risk.score || 99) - (b.risk.score || 99));
+  const jps = (DATA.japan || []).slice().sort((a, b) => (a.risk.score || 99) - (b.risk.score || 99));
   $("etf-list").innerHTML = etfs.map(watchItem).join("") || '<div class="card tip">暂无数据</div>';
   $("stock-list").innerHTML = stocks.map(watchItem).join("") || '<div class="card tip">暂无数据</div>';
+  $("jp-list").innerHTML = jps.map(watchItem).join("") || '<div class="card tip">暂无数据</div>';
+  document.querySelectorAll("#etf-list .item, #stock-list .item, #jp-list .item").forEach(el => el.onclick = () => openDetail(el.dataset.s));
+  renderFavs();
 }
 
-/* ---------- 持仓 ---------- */
+function getFavs() {
+  try { return JSON.parse(localStorage.getItem("ma_favs") || "[]"); } catch { return []; }
+}
+function saveFavs(list) { localStorage.setItem("ma_favs", JSON.stringify(list)); }
+
+function renderFavs() {
+  const favs = getFavs();
+  const items = favs.map(findItem).filter(Boolean);
+  $("fav-list").innerHTML = items.map(watchItem).join("") || '<div class="card tip">还没有收藏。搜索任意全球标的，点 ☆ 收藏。</div>';
+  document.querySelectorAll("#fav-list .item").forEach(el => el.onclick = () => openDetail(el.dataset.s));
+}
+
+/* ========== 搜索 ========== */
+function bindSearch() {
+  const input = $("search-input");
+  const box = $("search-results");
+  let timer = null;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const q = input.value.trim().toLowerCase();
+      if (!q) { box.style.display = "none"; return; }
+      if (!DATA || !DATA.search_index) return;
+      const hits = DATA.search_index.filter(x =>
+        x.symbol.toLowerCase().includes(q) || (x.name || "").toLowerCase().includes(q)
+      ).slice(0, 30);
+      if (!hits.length) { box.innerHTML = '<div class="sr-item muted">没有匹配的标的</div>'; box.style.display = "block"; return; }
+      box.innerHTML = hits.map(x => `<div class="sr-item" data-s="${x.symbol}">
+        <div class="sr-name">${x.name} <span class="sr-sym">${x.symbol}</span></div>
+        <div class="sr-sub">${x.type || ""} ${x.region ? "· " + x.region : ""} ${x.price ? "· " + fmt(x.price) : ""} <span class="${x.chg1d_pct > 0 ? "up" : x.chg1d_pct < 0 ? "down" : ""}">${sign(x.chg1d_pct)}%</span></div>
+      </div>`).join("");
+      box.style.display = "block";
+      box.querySelectorAll(".sr-item").forEach(el => el.onclick = () => {
+        box.style.display = "none"; input.value = "";
+        openDetail(el.dataset.s);
+      });
+    }, 150);
+  });
+  document.addEventListener("click", (e) => {
+    if (!box.contains(e.target) && e.target !== input) box.style.display = "none";
+  });
+}
+
+/* ========== 详情弹层 ========== */
+function openDetail(symbol) {
+  const it = findItem(symbol);
+  if (!it) { toast("未找到 " + symbol); return; }
+  currentSymbol = symbol;
+  currentRange = "1m";
+  $("m-title").textContent = it.name || it.symbol;
+  $("m-sub").textContent = `${it.symbol} · ${it.type || typeOf(it)}${it.region ? " · " + it.region : ""}`;
+  $("m-price").textContent = fmt(it.price, it.price > 10000 ? 0 : 2);
+  const c = it.chg1d_pct > 0 ? "up" : it.chg1d_pct < 0 ? "down" : "flat";
+  $("m-chg").textContent = `${sign(it.chg1d_pct)}%`;
+  $("m-chg").className = "chg " + c;
+  $("m-risk").outerHTML = `<span class="risk-badge ${it.risk ? (it.risk.level === "低风险" ? "risk-low" : it.risk.level === "中风险" ? "risk-mid" : it.risk.level === "中高风险" ? "risk-midhigh" : "risk-high") : ""}" id="m-risk">${it.risk ? it.risk.level : "—"}</span>`;
+  const fav = getFavs().includes(symbol);
+  $("m-fav").textContent = fav ? "★ 已收藏" : "☆ 收藏";
+  $("m-fav").classList.toggle("fav-on", fav);
+  $("m-updated").textContent = DATA.generated_at || "—";
+
+  const p = it.prediction || {};
+  const ai = p.ai || {};
+  $("m-dir").textContent = ai.direction || p.direction || "—";
+  $("m-dir").className = "pred-dir " + dirClass(ai.direction || p.direction);
+  $("m-conf").textContent = p.confidence !== null && p.confidence !== undefined ? p.confidence + "%" : "—";
+  const d10 = (p.horizons || {}).d10 || {};
+  $("m-center").textContent = fmt(d10.center);
+  $("m-support").textContent = fmt(ai.support);
+  $("m-resistance").textContent = fmt(ai.resistance);
+  $("m-why").textContent = ai.rationale || "（该标的暂无 AI 深度预测，显示统计区间）";
+  $("m-note").textContent = "预测模型：" + (p.model || "统计区间") + " · AI 预测为概率性判断，不构成投资建议。";
+  $("m-ind").innerHTML = indGrid(it);
+  $("modal-mask").style.display = "flex";
+  document.body.style.overflow = "hidden";
+  setTimeout(() => drawChart(it), 60);
+}
+
+function typeOf(it) {
+  if (it.symbol.endsWith("=X")) return "汇率";
+  if (it.symbol.endsWith("=F")) return "商品";
+  if (it.symbol.endsWith(".T")) return "日股";
+  if (it.symbol.startsWith("^")) return "指数";
+  return "标的";
+}
+
+function dirClass(d) {
+  if (d === "偏多") return "dir-up";
+  if (d === "偏空") return "dir-down";
+  return "dir-flat";
+}
+
+function indGrid(it) {
+  const cells = [
+    ["RSI(14)", fmt(it.rsi14, 0)],
+    ["年化波动率", it.vol20_annual_pct ? fmt(it.vol20_annual_pct, 0) + "%" : "—"],
+    ["MA20", fmt(it.ma20)],
+    ["MA50", fmt(it.ma50)],
+    ["MA200", it.ma200 ? fmt(it.ma200) : "—"],
+    ["52周最高", fmt(it.high52)],
+    ["52周最低", fmt(it.low52)],
+    ["52周位置", it.pct52w !== undefined ? fmt(it.pct52w, 0) + "%" : "—"],
+    ["一周涨跌", sign(it.chg1w_pct) + "%"],
+    ["趋势", it.trend === 2 ? "强势" : it.trend === 0 ? "偏弱" : "中性"],
+  ];
+  if (it.pe) cells.push(["PE", fmt(it.pe, 1)]);
+  if (it.pb) cells.push(["PB", fmt(it.pb, 2)]);
+  if (it.divYield) cells.push(["股息率", (it.divYield * 100).toFixed(2) + "%"]);
+  return cells.map(x => `<div class="ind-cell"><div class="ind-label">${x[0]}</div><div class="ind-val">${x[1]}</div></div>`).join("");
+}
+
+function drawChart(it) {
+  const hist = it.history || [];
+  const box = $("m-chart");
+  if (!box || !window.echarts) return;
+  if (chart) { chart.dispose(); chart = null; }
+  chart = echarts.init(box, null, { renderer: "canvas" });
+  if (!hist.length) {
+    chart.setOption({
+      title: { text: "暂无历史数据（快照标的仅当日行情）", left: "center", top: "middle", textStyle: { color: "#888", fontSize: 12 } },
+      backgroundColor: "transparent",
+    });
+    return;
+  }
+  const ranges = { "1m": 20, "3m": 60, "6m": 125, "1y": 250 };
+  const n = ranges[currentRange] || 250;
+  const slice = hist.slice(-n);
+  const dates = slice.map(x => x[0]);
+  const closes = slice.map(x => x[1]);
+  const lastDate = dates[dates.length - 1];
+  const lastClose = closes[closes.length - 1];
+
+  // 预测点（未来 5/10/20 交易日 ≈ 7/14/28 日历日）
+  const p = it.prediction || {};
+  const h = p.horizons || {};
+  const mkDate = (dd) => {
+    const dt = new Date(lastDate + "T00:00:00");
+    dt.setDate(dt.getDate() + dd);
+    return dt.toISOString().slice(0, 10);
+  };
+  const f5 = mkDate(7), f10 = mkDate(14), f20 = mkDate(28);
+  const centerLine = [[f5, h.d5 ? h.d5.center : null], [f10, h.d10 ? h.d10.center : null], [f20, h.d20 ? h.d20.center : null]];
+  const upLine = [[f5, h.d5 ? h.d5.up : null], [f10, h.d10 ? h.d10.up : null], [f20, h.d20 ? h.d20.up : null]];
+  const downLine = [[f5, h.d5 ? h.d5.down : null], [f10, h.d10 ? h.d10.down : null], [f20, h.d20 ? h.d20.down : null]];
+
+  const series = [{
+    name: "收盘价", type: "line", data: closes, showSymbol: false,
+    lineStyle: { width: 2, color: "#4c9aff" }, itemStyle: { color: "#4c9aff" },
+    areaStyle: { color: "rgba(76,154,255,.12)" },
+    markLine: {
+      symbol: "none", label: { fontSize: 9, color: "#aaa" },
+      data: it.ma20 ? [{ name: "MA20", yAxis: it.ma20, lineStyle: { color: "#f5a623", type: "dashed", width: 1 } }] : [],
+    },
+  }];
+  if (h.d5) {
+    series.push(
+      { name: "预测中枢", type: "line", data: centerLine, showSymbol: true, symbolSize: 6, lineStyle: { color: "#f76b15", type: "dashed", width: 2 }, itemStyle: { color: "#f76b15" }, connectNulls: true },
+      { name: "预测上沿", type: "line", data: upLine, showSymbol: false, lineStyle: { color: "#f76b15", type: "dotted", width: 1, opacity: .6 }, itemStyle: { color: "#f76b15" }, connectNulls: true },
+      { name: "预测下沿", type: "line", data: downLine, showSymbol: false, lineStyle: { color: "#f76b15", type: "dotted", width: 1, opacity: .6 }, itemStyle: { color: "#f76b15" }, connectNulls: true }
+    );
+  }
+  chart.setOption({
+    backgroundColor: "transparent",
+    animation: false,
+    grid: { left: 8, right: 8, top: 18, bottom: 8, containLabel: true },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "#1b2030", borderColor: "#333", textStyle: { color: "#eee", fontSize: 11 },
+      formatter: (params) => {
+        let s = params[0].name;
+        params.forEach(x => { if (x.value != null) s += `<br>${x.seriesName}: <b>${fmt(x.value)}</b>`; });
+        return s;
+      },
+    },
+    xAxis: { type: "category", data: dates.concat([f5, f10, f20]), axisLabel: { color: "#888", fontSize: 9 }, axisLine: { lineStyle: { color: "#333" } }, splitLine: { show: false } },
+    yAxis: { type: "value", scale: true, axisLabel: { color: "#888", fontSize: 9 }, splitLine: { lineStyle: { color: "#222" } } },
+    series: series,
+  });
+  box.style.height = "280px";
+  chart.resize();
+}
+
+function closeDetail() {
+  $("modal-mask").style.display = "none";
+  document.body.style.overflow = "";
+  if (chart) { chart.dispose(); chart = null; }
+}
+
+/* ========== 持仓 ========== */
 function getPortfolio() {
   try { return JSON.parse(localStorage.getItem("ma_portfolio") || "[]"); } catch { return []; }
 }
 function savePortfolio(list) { localStorage.setItem("ma_portfolio", JSON.stringify(list)); }
-
-function addHolding(code, qty, cost) {
-  const list = getPortfolio();
-  list.push({ code: code.trim().toUpperCase(), qty: parseFloat(qty) || 0, cost: cost ? parseFloat(cost) : null });
-  savePortfolio(list);
-  renderPortfolio();
-}
 
 function renderPortfolio() {
   const list = getPortfolio();
@@ -121,18 +335,18 @@ function renderPortfolio() {
   const sum = $("portfolio-summary");
   if (!list.length) { box.innerHTML = '<div class="card tip">还没有持仓，添加一个吧。</div>'; sum.style.display = "none"; return; }
   const pool = {};
-  [...(DATA.etfs || []), ...(DATA.stocks || [])].forEach(x => pool[x.symbol] = x);
-  let totalVal = 0, totalCost = 0, totalRisk = 0;
+  [...(DATA.etfs || []), ...(DATA.stocks || []), ...(DATA.japan || [])].forEach(x => pool[x.symbol] = x);
+  let totalVal = 0, totalCost = 0;
   const rows = list.map((h, i) => {
     const it = pool[h.code];
     let price, currency = "JPY", risk = null, extra = "";
     if (it) {
       price = it.price;
-      currency = it.region === "US" || it.region === "Global" || it.region === "EM" || it.region === "Gold" || it.region === "Bond" ? "USD" : "JPY";
+      currency = (it.region === "US" || it.region === "Global" || it.region === "EM" || it.region === "Gold" || it.region === "Bond" || it.region === "Silver" || it.region === "CN" || it.region === "BR") ? "USD" : "JPY";
       risk = it.risk;
       extra = `<div class="sub">${it.name} · 风险 ${risk ? risk.level : "—"}</div>`;
     } else {
-      extra = `<div class="sub">未在每日追踪池（仅记录，不诊断）</div>`;
+      extra = `<div class="sub">未在追踪池（仅记录，不诊断）</div>`;
     }
     const val = price ? (currency === "USD" ? price * h.qty * USDJPY : price * h.qty) : 0;
     const costVal = h.cost ? (currency === "USD" ? h.cost * h.qty * USDJPY : h.cost * h.qty) : null;
@@ -163,12 +377,11 @@ function renderPortfolio() {
     <div class="hint">注：美股按今日 USD/JPY（${fmt(USDJPY)}）换算，汇率波动也会影响盈亏。</div>`;
 }
 
-/* ---------- SBI CSV 解析 ---------- */
 function parseCSV(text) {
   const rows = text.split(/\r?\n/).filter(l => l.trim());
   if (!rows.length) return { ok: false, msg: "内容为空" };
   const header = rows[0].split(/[,，\t]/).map(s => s.trim());
-  const codeIdx = header.findIndex(h => /コード|コード|code/i.test(h));
+  const codeIdx = header.findIndex(h => /コード|code/i.test(h));
   const qtyIdx = header.findIndex(h => /数量|口数|株数/i.test(h));
   const costIdx = header.findIndex(h => /取得単価|取得価額|取得单价/i.test(h));
   const nameIdx = header.findIndex(h => /銘柄|ファンド名|名称/i.test(h));
@@ -179,10 +392,7 @@ function parseCSV(text) {
     const cells = rows[i].split(/[,，\t]/).map(s => s.trim());
     if (cells.length < 2) continue;
     let code = codeIdx >= 0 ? cells[codeIdx] : "";
-    if (codeIdx < 0 && nameIdx >= 0) {
-      // 日本投信无代码时用名称（可后续手动配代码）
-      code = cells[nameIdx];
-    }
+    if (codeIdx < 0 && nameIdx >= 0) code = cells[nameIdx];
     const qty = qtyIdx >= 0 ? parseFloat(cells[qtyIdx].replace(/[^0-9.\-]/g, "")) : 0;
     const cost = costIdx >= 0 ? parseFloat(cells[costIdx].replace(/[^0-9.\-]/g, "")) : null;
     if (!code || isNaN(qty) || qty <= 0) continue;
@@ -193,7 +403,7 @@ function parseCSV(text) {
   return { ok: true, msg: "导入 " + added + " 条" };
 }
 
-/* ---------- 设置 ---------- */
+/* ========== 设置 ========== */
 function loadSettings() {
   const s = JSON.parse(localStorage.getItem("ma_settings") || "{}");
   if (s.risk) $("s-risk").value = s.risk;
@@ -203,14 +413,12 @@ function saveSettings() {
   $("s-status").textContent = "已保存（风险偏好用于排序提示）";
 }
 
-/* ---------- 状态条 ---------- */
 function toast(msg) {
   const bar = $("status-bar");
   bar.textContent = msg; bar.classList.add("show");
   setTimeout(() => bar.classList.remove("show"), 2600);
 }
 
-/* ---------- Tab ---------- */
 function bindTabs() {
   document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
@@ -220,15 +428,42 @@ function bindTabs() {
   });
 }
 
-/* ---------- 启动 ---------- */
+/* ========== 启动 ========== */
 async function init() {
   bindTabs();
+  bindSearch();
   loadSettings();
+
+  $("m-close").onclick = closeDetail;
+  $("modal-mask").onclick = (e) => { if (e.target === $("modal-mask")) closeDetail(); };
+  $("m-fav").onclick = () => {
+    if (!currentSymbol) return;
+    const favs = getFavs();
+    const i = favs.indexOf(currentSymbol);
+    if (i >= 0) favs.splice(i, 1); else favs.push(currentSymbol);
+    saveFavs(favs);
+    const on = favs.includes(currentSymbol);
+    $("m-fav").textContent = on ? "★ 已收藏" : "☆ 收藏";
+    $("m-fav").classList.toggle("fav-on", on);
+    renderFavs();
+    toast(on ? "已收藏" : "已取消收藏");
+  };
+  document.querySelectorAll("#m-range .rng").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#m-range .rng").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    currentRange = b.dataset.r;
+    const it = findItem(currentSymbol);
+    if (it) drawChart(it);
+  });
+
   $("p-add").onclick = () => {
     const c = $("p-code").value, q = $("p-qty").value, cst = $("p-cost").value;
     if (!c || !q) { toast("请输入代码和数量"); return; }
-    addHolding(c, q, cst);
+    const list = getPortfolio();
+    list.push({ code: c.trim().toUpperCase(), qty: parseFloat(q) || 0, cost: cst ? parseFloat(cst) : null });
+    savePortfolio(list);
     $("p-code").value = ""; $("p-qty").value = ""; $("p-cost").value = "";
+    renderPortfolio();
     toast("已添加");
   };
   $("p-import").onclick = () => {
@@ -238,12 +473,18 @@ async function init() {
     renderPortfolio();
   };
   $("s-save").onclick = () => { saveSettings(); toast("设置已保存"); };
+  $("etf-toggle").onclick = (e) => {
+    const listEl = $("etf-list");
+    listEl.classList.toggle("collapsed");
+    e.target.textContent = listEl.classList.contains("collapsed") ? "显示全部 25 个 ▾" : "收起 ▴";
+  };
+
   try {
     const res = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     DATA = await res.json();
   } catch (e) {
-    $("ai-text").textContent = "数据加载失败：" + e.message + "（请确认已通过 GitHub Pages 部署或网络正常）";
+    $("ai-text").textContent = "数据加载失败：" + e.message;
     $("date").textContent = "—";
     return;
   }
