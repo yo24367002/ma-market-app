@@ -32,7 +32,7 @@ function badge(r) {
 
 function findItem(symbol) {
   if (!DATA) return null;
-  for (const k of ["indexes", "etfs", "stocks", "japan", "fx", "commodities"]) {
+  for (const k of ["indexes", "etfs", "stocks", "japan", "funds", "fx", "commodities"]) {
     const it = (DATA[k] || []).find(x => x.symbol === symbol);
     if (it) return it;
   }
@@ -516,10 +516,18 @@ function renderPortfolio() {
   const sum = $("portfolio-summary");
   if (!list.length) { box.innerHTML = '<div class="card tip">还没有持仓，拍照导入或添加一个吧。</div>'; sum.style.display = "none"; return; }
   const pool = {};
-  [...(DATA.etfs || []), ...(DATA.stocks || []), ...(DATA.japan || [])].forEach(x => pool[x.symbol] = x);
+  [...(DATA.etfs || []), ...(DATA.stocks || []), ...(DATA.japan || []), ...(DATA.funds || [])].forEach(x => pool[x.symbol] = x);
+  const norm = s => (s || "").toLowerCase().replace(/[\s（）()　・･．.、]/g, "");
   let totalVal = 0, totalCost = 0;
   const rows = list.map((h, i) => {
-    const it = pool[h.code];
+    let it = pool[h.code];
+    if (!it && h.name) {
+      const hn = norm(h.name);
+      for (const k in pool) {
+        const pn = norm(pool[k].name || "");
+        if (pn && (pn === hn || (hn.length >= 6 && pn.includes(hn)) || (pn.length >= 6 && hn.includes(pn)))) { it = pool[k]; break; }
+      }
+    }
     let price, currency = "JPY", risk = null, extra = "";
     if (it) {
       price = it.price;
@@ -536,7 +544,7 @@ function renderPortfolio() {
     if (costVal) totalCost += costVal;
     const pnl = costVal ? val - costVal : null;
     const title = h.name || it?.name || h.code;
-    return `<div class="port-row">
+    return `<div class="port-row${it ? " port-ok" : ""}"${it ? ` data-s="${it.symbol}"` : ""}>
       <div>
         <div class="nm">${title} <span class="sub">× ${h.qty}</span></div>
         ${extra}
@@ -549,7 +557,9 @@ function renderPortfolio() {
     </div>`;
   });
   box.innerHTML = rows.join("");
-  document.querySelectorAll(".del").forEach(b => b.onclick = () => {
+  box.querySelectorAll("[data-s]").forEach(el => el.onclick = () => openDetail(el.dataset.s));
+  document.querySelectorAll(".del").forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
     const list2 = getPortfolio(); list2.splice(+b.dataset.i, 1); savePortfolio(list2); renderPortfolio();
   });
   sum.style.display = "block";
