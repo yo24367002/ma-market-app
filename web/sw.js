@@ -1,11 +1,12 @@
 /* 离线缓存 - 每次更新 data.json 后自动刷新缓存 */
-const CACHE = "ma-market-v1";
+const CACHE = "ma-market-v2";
 const CORE = [
   "./index.html",
   "./style.css",
   "./app.js",
   "./manifest.json",
-  "./icon-192.png"
+  "./icon-192.png",
+  "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"
 ];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));
