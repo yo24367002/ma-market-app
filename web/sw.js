@@ -1,5 +1,5 @@
 /* 离线缓存 - 每次更新 data.json 后自动刷新缓存 */
-const CACHE = "ma-market-v2";
+const CACHE = "ma-market-v3";
 const CORE = [
   "./index.html",
   "./style.css",
