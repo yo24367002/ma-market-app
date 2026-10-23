@@ -8,13 +8,17 @@ fetch_data.py v2 - 全球市场数据管道
 """
 import json
 import math
+import re
 import datetime
 import traceback
+import urllib.request
 
 try:
     import yfinance as yf
 except ImportError:
     yf = None
+
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 # ================= 精选池 (FULL) =================
 INDEXES = [
@@ -103,6 +107,22 @@ COMMODITIES = [
     {"symbol": "GC=F", "name": "黄金期货", "unit": "美元/盎司"},
     {"symbol": "CL=F", "name": "WTI原油", "unit": "美元/桶"},
     {"symbol": "SI=F", "name": "白银期货", "unit": "美元/盎司"},
+]
+
+# ================= 日本投资信托 (精选, 每日基准价) =================
+# isin: 乐天证券投信页 ID；yahoo: Yahoo 投信代码；name: 完整名称(前端按名称匹配)
+JAPAN_FUNDS = [
+    {"isin": "JP90C000H1T1", "yahoo": "0331418A", "name": "eMAXIS Slim 全世界株式(オール・カントリー)", "kind": "全球股票"},
+    {"isin": "JP90C000GKC6", "yahoo": "", "name": "eMAXIS Slim 米国株式(S&P500)", "kind": "美国股票"},
+    {"isin": "JP90C000F7H5", "yahoo": "", "name": "eMAXIS Slim 新興国株式インデックス", "kind": "新兴市场股票"},
+    {"isin": "JP90C000FXV1", "yahoo": "", "name": "eMAXIS Slim 国内株式(日経平均)", "kind": "日本股票"},
+    {"isin": "JP90C000R9Z9", "yahoo": "", "name": "eMAXIS Slim 先進国株式(含む日本)＜オール先進国＞", "kind": "发达市场股票"},
+    {"isin": "JP90C000EWV6", "yahoo": "", "name": "eMAXIS Slim バランス(8資産均等型)", "kind": "平衡型"},
+    {"isin": "JP90C00074C7", "yahoo": "", "name": "eMAXIS 全世界株式インデックス(除く日本)", "kind": "全球股票"},
+    {"isin": "JP90C0008CH5", "yahoo": "", "name": "ひふみプラス", "kind": "日本主动"},
+    {"isin": "JP90C000JFM9", "yahoo": "", "name": "ひふみワールド＋", "kind": "全球主动"},
+    {"isin": "JP90C000FHC4", "yahoo": "", "name": "楽天・全世界株式インデックス・ファンド", "kind": "全球股票"},
+    {"isin": "JP90C000FHD2", "yahoo": "", "name": "楽天・全米株式インデックス・ファンド", "kind": "美国股票"},
 ]
 
 # ================= 快照池 (SNAP ~300) =================
@@ -297,12 +317,106 @@ def analyze_snap(hist, symbol):
     spark = [[d, round(c, 2)] for d, c in zip(dates[-10:], closes[-10:])]
     return {"symbol": symbol, "price": round(last, 2), "chg1d_pct": chg, "spark": spark}
 
+# ================= 日本投资信托: 乐天证券净值 =================
+def fetch_fund_nav(isin, days=400):
+    """从乐天证券投信详情页提取基准价日序列(近 days 条, 正序 [(date, nav)])。
+    nav 系列是页面 Highcharts 中 id:'nav' 的数据数组。"""
+    url = "https://www.rakuten-sec.co.jp/web/fund/detail/?ID=" + isin
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            html = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    i = html.find("id: 'nav'")
+    if i < 0:
+        return None
+    j = html.find("data : [", i)
+    if j < 0:
+        return None
+    start = html.find("[", j)
+    depth = 0
+    end = -1
+    for p in range(start, min(start + 400000, len(html))):
+        c = html[p]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                end = p
+                break
+    if end < 0:
+        return None
+    raw = html[start:end + 1]
+    pts = re.findall(r"\[\s*(\d{13})\s*,\s*(\d+(?:\.\d+)?)\s*\]", raw)
+    if not pts:
+        # 回退: 全页所有日期点, 按日取最小值(=基准价, 纯资产额/份额均不低于基准价)
+        allpts = re.findall(r"\[\s*(\d{13})\s*,\s*(\d+(?:\.\d+)?)\s*\]", html)
+        byday = {}
+        for ep, val in allpts:
+            d = datetime.datetime.fromtimestamp(int(ep) / 1000).strftime("%Y-%m-%d")
+            v = float(val)
+            if d not in byday or v < byday[d]:
+                byday[d] = v
+        seq = [(d, v) for d, v in sorted(byday.items())]
+        return seq[-days:] if seq else None
+    seq = []
+    seen = set()
+    for ep, val in pts:
+        d = datetime.datetime.fromtimestamp(int(ep) / 1000).strftime("%Y-%m-%d")
+        if d in seen:
+            continue
+        seen.add(d)
+        seq.append((d, float(val)))
+    seq.sort()
+    return seq[-days:]
+
+def analyze_fund(seq, isin, meta):
+    """对投信净值序列计算与 analyze_history 同构的指标(RSI/MA/波动/52周/趋势/预测)"""
+    if not seq or len(seq) < 30:
+        return None
+    dates = [d for d, _ in seq]
+    closes = [v for _, v in seq]
+    last = closes[-1]
+    prev_day = closes[-2] if len(closes) > 1 else last
+    prev_week = closes[-6] if len(closes) > 5 else closes[0]
+    high_52 = max(closes); low_52 = min(closes)
+    pct52 = (last - low_52) / (high_52 - low_52) * 100 if high_52 != low_52 else 50.0
+    r = rsi(closes)
+    ma20 = ma(closes, 20); ma50 = ma(closes, 50); ma200 = ma(closes, 200)
+    trend = 1
+    if ma20 and ma50:
+        if last > ma20 > ma50: trend = 2
+        elif last < ma20 < ma50: trend = 0
+    hist_series = [[d, round(c, 2)] for d, c in zip(dates[-250:], closes[-250:])]
+    a = {
+        "symbol": isin,
+        "price": round(last, 2),
+        "chg1d_pct": round((last / prev_day - 1) * 100, 2) if prev_day else None,
+        "chg1w_pct": round((last / prev_week - 1) * 100, 2) if prev_week else None,
+        "rsi14": round(r, 1) if r is not None else None,
+        "ma20": round(ma20, 2) if ma20 else None,
+        "ma50": round(ma50, 2) if ma50 else None,
+        "ma200": round(ma200, 2) if ma200 else None,
+        "vol20_annual_pct": round(annual_vol(closes), 1) if annual_vol(closes) else None,
+        "pct52w": round(pct52, 1),
+        "high52": round(high_52, 2),
+        "low52": round(low_52, 2),
+        "trend": trend,
+        "history": hist_series,
+    }
+    a.update(meta)
+    a["risk"] = risk_score(a)
+    a["prediction"] = stat_prediction(closes)
+    return a
+
 # ================= 主流程 =================
 def fetch_all():
     result = {
         "generated_at": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M"),
         "date_jp": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y年%m月%d日"),
-        "indexes": [], "etfs": [], "stocks": [], "japan": [], "fx": [], "commodities": [],
+        "indexes": [], "etfs": [], "stocks": [], "japan": [], "funds": [], "fx": [], "commodities": [],
         "watch": [], "search_index": [],
         "risk_note": "风险评分权重(平衡型): 波动率35% + 趋势25% + RSI极端度20% + 52周位置20%。评分越高风险越大。AI预测为概率性判断，仅作参考，不构成投资建议。",
         "ai": None,
@@ -353,6 +467,18 @@ def fetch_all():
     for item in FX: build(item["symbol"], item, result["fx"])
     for item in COMMODITIES: build(item["symbol"], item, result["commodities"])
 
+    # --- 日本投资信托: 乐天基准价日序列(精选级, 可诊断) ---
+    for item in JAPAN_FUNDS:
+        try:
+            seq = fetch_fund_nav(item["isin"])
+            a = analyze_fund(seq, item["isin"], {"name": item["name"], "region": "日本", "kind": item["kind"], "unit": "円"})
+            if a:
+                result["funds"].append(a)
+            else:
+                print("FUND_FAIL", item["isin"], item["name"])
+        except Exception as e:
+            print("FUND_ERR", item["isin"], repr(e))
+
     # --- 快照池: 1个月日线 ---
     snap_symbols = list(dict.fromkeys(SNAP_ETF + SNAP_STOCK + SNAP_JP + SNAP_HK))
     # 去掉与精选池重复的
@@ -381,7 +507,7 @@ def fetch_all():
     # --- 搜索索引 ---
     idx = []
     for bucket, t in [(result["indexes"], "指数"), (result["etfs"], "ETF"), (result["stocks"], "美股"),
-                      (result["japan"], "日股"), (result["fx"], "汇率"), (result["commodities"], "商品")]:
+                      (result["japan"], "日股"), (result["funds"], "投信"), (result["fx"], "汇率"), (result["commodities"], "商品")]:
         for a in bucket:
             idx.append({"symbol": a["symbol"], "name": a.get("name", a["symbol"]),
                         "type": t, "region": a.get("region", ""),
@@ -397,7 +523,7 @@ if __name__ == "__main__":
     out = fetch_all()
     with open("data.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
-    print("OK: idx=%d etf=%d stock=%d jp=%d fx=%d comm=%d watch=%d search=%d err=%s" % (
+    print("OK: idx=%d etf=%d stock=%d jp=%d fund=%d fx=%d comm=%d watch=%d search=%d err=%s" % (
         len(out["indexes"]), len(out["etfs"]), len(out["stocks"]), len(out["japan"]),
-        len(out["fx"]), len(out["commodities"]), len(out["watch"]), len(out["search_index"]),
+        len(out["funds"]), len(out["fx"]), len(out["commodities"]), len(out["watch"]), len(out["search_index"]),
         out.get("error")))
