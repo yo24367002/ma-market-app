@@ -105,6 +105,9 @@
         <option value="balanced" selected>平衡型</option>
         <option value="aggressive">积极型</option>
       </select>
+      <label>Gemini API Key（用于持仓截图 AI 识别）</label>
+      <input id="s-gemini" type="password" placeholder="粘贴 AIza… 开头的 Key" autocomplete="off" />
+      <div class="hint">Key 只保存在本机浏览器里，不会上传。用你自己的 Gemini Key，手机电脑都填一次即可。</div>
       <button id="s-save">保存设置</button>
       <div class="hint" id="s-status">AI 解读由后台每日自动生成并随数据更新，无需在本机配置任何 Key。</div>
     </div>
