@@ -62,7 +62,7 @@ def analyze_all(data):
         return data
     # ---- 1) 重点标的 AI 预测 ----
     key_items = (
-        data["indexes"][:6] + data["etfs"][:6] + data["stocks"][:5] + data["japan"][:3]
+        data["funds"][:3] + data["indexes"][:4] + data["etfs"][:4] + data["japan"][:2] + data["stocks"][:2]
     )
     cands = []
     for it in key_items:
@@ -121,11 +121,11 @@ def analyze_all(data):
 
     # ---- 2) 全市场 AI 解读 ----
     summary = []
-    for grp, name in [("indexes", "指数"), ("etfs", "ETF"), ("stocks", "美股"), ("japan", "日股")]:
+    for grp, name in [("indexes", "指数"), ("etfs", "ETF"), ("stocks", "美股"), ("japan", "日股"), ("funds", "日本投信")]:
         for it in data.get(grp, [])[:12]:
             summary.append(f"{it.get('name', it['symbol'])}({it['symbol']}) 现价{it.get('price')} 当日{it.get('chg1d_pct')}% 周涨{it.get('chg1w_pct')}% RSI{it.get('rsi14')} 风险{((it.get('risk') or {}).get('level'))}")
     ai_pick = []
-    for it in data["indexes"][:3] + data["etfs"][:3] + data["stocks"][:2] + data["japan"][:1]:
+    for it in data["indexes"][:3] + data["etfs"][:3] + data["stocks"][:2] + data["japan"][:1] + data["funds"][:2]:
         p = it.get("prediction") or {}
         ai = p.get("ai") or {}
         stat = p.get("horizons") or {}
