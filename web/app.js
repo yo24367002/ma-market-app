@@ -323,6 +323,187 @@ function closeDetail() {
   if (chart) { chart.dispose(); chart = null; }
 }
 
+/* ========== 持仓图片 AI 识别导入 ========== */
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
+const OCR_PROMPT = "这是日本SBI证券的持仓画面截图。请识别表格内容，输出JSON数组，每项字段: name(銘柄名), code(4位コード), qty(数量/口数原文), qty_num(纯数字), cost(取得単価纯数字), amount(評価金額纯数字如512340), total(评估金额合计纯数字)。只输出JSON，不要其他文字。";
+let imgRows = [];
+
+function getGeminiKey() {
+  try { return (localStorage.getItem("ma_gemini_key") || "").trim(); } catch { return ""; }
+}
+
+async function geminiVision(dataUrl) {
+  const key = getGeminiKey();
+  if (!key) throw new Error("请先在「设置」页填写 Gemini API Key");
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 40000);
+  try {
+    const res = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: JSON.stringify({
+        model: GEMINI_MODEL,
+        messages: [{ role: "user", content: [
+          { type: "text", text: OCR_PROMPT },
+          { type: "image_url", image_url: { url: dataUrl } }
+        ] }],
+        temperature: 0.1, max_tokens: 1024,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const j = await res.json();
+    return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? "识别超时，请重试" : "识别失败：" + e.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error("读取文件失败"));
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("图片无法解析"));
+      img.onload = () => {
+        // 压缩到最长边 1600，控制请求体积
+        const MAX = 1600;
+        let w = img.width, h = img.height;
+        if (Math.max(w, h) > MAX) { const k = MAX / Math.max(w, h); w = Math.round(w * k); h = Math.round(h * k); }
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        cv.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(cv.toDataURL("image/jpeg", 0.92));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+function parseImgResult(text) {
+  let t = (text || "").trim();
+  t = t.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  const start = t.indexOf("["), end = t.lastIndexOf("]");
+  if (start >= 0 && end > start) t = t.slice(start, end + 1);
+  const arr = JSON.parse(t);
+  if (!Array.isArray(arr)) throw new Error("识别结果格式异常");
+  return arr.filter(r => r && (r.name || r.code)).map(r => ({
+    name: String(r.name || "").trim(),
+    code: String(r.code || "").trim(),
+    qty: r.qty_num !== undefined && r.qty_num !== null ? String(r.qty_num) : (String(r.qty || "").replace(/[^0-9.]/g, "")),
+    cost: r.cost !== undefined && r.cost !== null ? String(r.cost) : "",
+    amount: r.amount !== undefined && r.amount !== null ? String(r.amount) : "",
+  }));
+}
+
+function showImgStatus(html, ok) {
+  const el = $("img-status");
+  el.style.display = "block";
+  el.innerHTML = html;
+  el.className = "img-status " + (ok ? "ok" : "err");
+}
+
+function renderImgRows() {
+  const box = $("img-rows");
+  if (!imgRows.length) { box.innerHTML = '<div class="tip">没有识别到持仓条目，换张清晰截图试试。</div>'; return; }
+  let total = 0;
+  box.innerHTML = imgRows.map((r, i) => {
+    const amt = parseFloat(r.amount);
+    if (!isNaN(amt)) total += amt;
+    return `<div class="ir-row" data-i="${i}">
+      <label class="ir-check"><input type="checkbox" checked data-i="${i}" /> <span>${i + 1}</span></label>
+      <div class="ir-fields">
+        <input class="ir-name" value="${r.name}" placeholder="名称" data-i="${i}" />
+        <input class="ir-code" value="${r.code}" placeholder="代码" data-i="${i}" />
+        <div class="ir-nums">
+          <input class="ir-qty" value="${r.qty}" placeholder="数量" inputmode="decimal" data-i="${i}" />
+          <input class="ir-cost" value="${r.cost}" placeholder="取得単価" inputmode="decimal" data-i="${i}" />
+          <input class="ir-amount" value="${r.amount}" placeholder="評価金額" inputmode="decimal" data-i="${i}" />
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+  $("img-total").innerHTML = "共识别 <b>" + imgRows.length + "</b> 条，评估金额合计 <b>¥" + Math.round(total).toLocaleString() + "</b>（请与截图合计核对）";
+  // 绑定编辑
+  box.querySelectorAll("input").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const i = +inp.dataset.i, f = imgRows[i];
+      if (!f) return;
+      if (inp.classList.contains("ir-name")) f.name = inp.value;
+      else if (inp.classList.contains("ir-code")) f.code = inp.value;
+      else if (inp.classList.contains("ir-qty")) f.qty = inp.value;
+      else if (inp.classList.contains("ir-cost")) f.cost = inp.value;
+      else if (inp.classList.contains("ir-amount")) f.amount = inp.value;
+    });
+  });
+  box.querySelectorAll(".ir-check input").forEach(cb => cb.addEventListener("change", () => {
+    const i = +cb.dataset.i;
+    cb.closest(".ir-row").classList.toggle("off", !cb.checked);
+  }));
+}
+
+async function handleImageFile(file) {
+  $("img-result").style.display = "none";
+  showImgStatus("⏳ 正在读取图片…", true);
+  let dataUrl;
+  try { dataUrl = await readImageFile(file); } catch (e) { showImgStatus("⚠ " + e.message, false); return; }
+  showImgStatus("🤖 AI 正在识别持仓…（约 5-15 秒）", true);
+  try {
+    const text = await geminiVision(dataUrl);
+    imgRows = parseImgResult(text);
+    $("img-status").style.display = "none";
+    $("img-result").style.display = "block";
+    renderImgRows();
+  } catch (e) {
+    showImgStatus("⚠ " + e.message, false);
+  }
+}
+
+function confirmImgImport() {
+  const picked = [];
+  document.querySelectorAll("#img-rows .ir-row").forEach(row => {
+    const cb = row.querySelector(".ir-check input");
+    if (cb && cb.checked) {
+      const i = +row.dataset.i, r = imgRows[i];
+      const qty = parseFloat(r.qty);
+      if (!r.code || isNaN(qty) || qty <= 0) return;
+      picked.push({
+        code: r.code.replace(/\D/g, "").slice(0, 6) || r.code,
+        qty: qty,
+        cost: r.cost !== "" && !isNaN(parseFloat(r.cost)) ? parseFloat(r.cost) : null,
+        name: r.name,
+        amount: r.amount !== "" && !isNaN(parseFloat(r.amount)) ? parseFloat(r.amount) : null,
+      });
+    }
+  });
+  if (!picked.length) { toast("没有可导入的有效条目（需有代码和数量）"); return; }
+  const list = getPortfolio();
+  // 同代码合并数量与市值
+  picked.forEach(p => {
+    const ex = list.find(x => x.code === p.code);
+    if (ex) {
+      ex.qty += p.qty;
+      if (p.cost) ex.cost = ex.cost ? Math.round((ex.cost + p.cost) / 2) : p.cost;
+      if (p.amount) ex.amount = (ex.amount || 0) + p.amount;
+      if (p.name && !ex.name) ex.name = p.name;
+    } else {
+      list.push(p);
+    }
+  });
+  savePortfolio(list);
+  imgRows = [];
+  $("img-result").style.display = "none";
+  $("img-status").style.display = "none";
+  $("p-img").value = "";
+  renderPortfolio();
+  toast("已导入 " + picked.length + " 条持仓");
+}
+
 /* ========== 持仓 ========== */
 function getPortfolio() {
   try { return JSON.parse(localStorage.getItem("ma_portfolio") || "[]"); } catch { return []; }
@@ -333,7 +514,7 @@ function renderPortfolio() {
   const list = getPortfolio();
   const box = $("portfolio-list");
   const sum = $("portfolio-summary");
-  if (!list.length) { box.innerHTML = '<div class="card tip">还没有持仓，添加一个吧。</div>'; sum.style.display = "none"; return; }
+  if (!list.length) { box.innerHTML = '<div class="card tip">还没有持仓，拍照导入或添加一个吧。</div>'; sum.style.display = "none"; return; }
   const pool = {};
   [...(DATA.etfs || []), ...(DATA.stocks || []), ...(DATA.japan || [])].forEach(x => pool[x.symbol] = x);
   let totalVal = 0, totalCost = 0;
@@ -346,16 +527,18 @@ function renderPortfolio() {
       risk = it.risk;
       extra = `<div class="sub">${it.name} · 风险 ${risk ? risk.level : "—"}</div>`;
     } else {
-      extra = `<div class="sub">未在追踪池（仅记录，不诊断）</div>`;
+      extra = h.name ? `<div class="sub">${h.name} · 未在追踪池（仅记录，不诊断）</div>` : `<div class="sub">未在追踪池（仅记录，不诊断）</div>`;
     }
-    const val = price ? (currency === "USD" ? price * h.qty * USDJPY : price * h.qty) : 0;
+    // 优先用识别到的评估金额（日元）；否则按池内价格估算
+    let val = h.amount && !isNaN(h.amount) ? h.amount : (price ? (currency === "USD" ? price * h.qty * USDJPY : price * h.qty) : 0);
     const costVal = h.cost ? (currency === "USD" ? h.cost * h.qty * USDJPY : h.cost * h.qty) : null;
     totalVal += val;
     if (costVal) totalCost += costVal;
     const pnl = costVal ? val - costVal : null;
+    const title = h.name || it?.name || h.code;
     return `<div class="port-row">
       <div>
-        <div class="nm">${h.code} × ${h.qty}</div>
+        <div class="nm">${title} <span class="sub">× ${h.qty}</span></div>
         ${extra}
       </div>
       <div style="text-align:right">
@@ -371,10 +554,10 @@ function renderPortfolio() {
   });
   sum.style.display = "block";
   const pct = totalCost ? ((totalVal - totalCost) / totalCost * 100) : null;
-  sum.innerHTML = `<div class="card-title">持仓汇总（按今日收盘价）</div>
+  sum.innerHTML = `<div class="card-title">持仓汇总</div>
     <div class="row"><span>估算市值</span><b>${fmtJPY(totalVal)}</b></div>
     <div class="row"><span>估算盈亏</span><b class="${pct !== null ? (pct >= 0 ? 'up' : 'down') : ''}">${pct !== null ? sign(pct) + "%" : "—"}</b></div>
-    <div class="hint">注：美股按今日 USD/JPY（${fmt(USDJPY)}）换算，汇率波动也会影响盈亏。</div>`;
+    <div class="hint">注：识别导入的持仓按截图时的评估金额记录；池内标的按今日收盘价估算，美股按 USD/JPY（${fmt(USDJPY)}）换算。</div>`;
 }
 
 function parseCSV(text) {
@@ -407,10 +590,13 @@ function parseCSV(text) {
 function loadSettings() {
   const s = JSON.parse(localStorage.getItem("ma_settings") || "{}");
   if (s.risk) $("s-risk").value = s.risk;
+  const k = getGeminiKey();
+  if (k) $("s-gemini").value = k;
 }
 function saveSettings() {
   localStorage.setItem("ma_settings", JSON.stringify({ risk: $("s-risk").value }));
-  $("s-status").textContent = "已保存（风险偏好用于排序提示）";
+  localStorage.setItem("ma_gemini_key", $("s-gemini").value.trim());
+  $("s-status").textContent = "已保存（风险偏好用于排序提示；Key 已存本机）";
 }
 
 function toast(msg) {
@@ -472,6 +658,12 @@ async function init() {
     toast(r.msg);
     renderPortfolio();
   };
+  $("p-img-btn").onclick = () => $("p-img").click();
+  $("p-img").onchange = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) handleImageFile(f);
+  };
+  $("img-confirm").onclick = confirmImgImport;
   $("s-save").onclick = () => { saveSettings(); toast("设置已保存"); };
   $("etf-toggle").onclick = (e) => {
     const listEl = $("etf-list");
