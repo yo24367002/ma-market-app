@@ -5,11 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="description" content="全球市场参谋：每日全球市场数据 + AI 解读 + 风险评分 + SBI 持仓诊断">
+<meta name="description" content="全球市场参谋：全球行情走势 + AI 预测 + 风险评分 + 全市场搜索">
 <title>全球市场参谋</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
 <body>
 <header>
@@ -19,6 +20,10 @@
       <h1>全球市场参谋</h1>
       <div class="date" id="date">加载中…</div>
     </div>
+  </div>
+  <div class="search-wrap">
+    <input id="search-input" type="search" placeholder="搜索全球股票 / ETF / 指数…" autocomplete="off" />
+    <div class="search-results" id="search-results"></div>
   </div>
 </header>
 
@@ -33,8 +38,8 @@
   <!-- 今日概览 -->
   <section id="tab-overview" class="panel active">
     <div class="card ai-card" id="ai-box">
-      <div class="card-title">🤖 AI 今日解读</div>
-      <div id="ai-text" class="ai-text">生成中…</div>
+      <div class="card-title">🤖 AI 今日解读 <span class="ai-tag" id="ai-tag">生成中</span></div>
+      <div id="ai-text" class="ai-text">加载中…</div>
     </div>
     <div class="section-title">全球指数 <span id="idx-time"></span></div>
     <div class="grid" id="index-grid"></div>
@@ -45,12 +50,19 @@
   <!-- 关注列表 -->
   <section id="tab-watch" class="panel">
     <div class="card tip">
-      ⚠️ 关注列表按「平衡型风险评分」排序，<b>分数越低越稳</b>。<br>AI 解读 + 数据评分仅供参考，<b>不构成投资建议</b>。
+      🔍 顶部搜索框可搜索 <b>408+</b> 个全球标的（指数/ETF/股票/汇率/商品），点击任意结果查看<b>走势图 + AI 预测</b>，收藏后出现在这里。<br>数据与评分仅供参考，<b>不构成投资建议</b>。
     </div>
-    <div class="section-title">ETF / 资产类别</div>
+    <div class="sec-head">
+      <div class="section-title">精选 ETF</div>
+      <button class="mini-btn" id="etf-toggle">全部 25 个 ▾</button>
+    </div>
     <div class="list" id="etf-list"></div>
-    <div class="section-title">代表性个股</div>
+    <div class="section-title">美股</div>
     <div class="list" id="stock-list"></div>
+    <div class="section-title">日本个股</div>
+    <div class="list" id="jp-list"></div>
+    <div class="section-title">❤️ 我的收藏</div>
+    <div class="list" id="fav-list"></div>
   </section>
 
   <!-- 持仓 -->
@@ -59,7 +71,7 @@
       两种方式管理持仓：<br>① 从 SBI 复制持仓表格/CSV 粘贴到下方 → 「导入」<br>② 手动添加代码和数量
     </div>
     <div class="add-row">
-      <input id="p-code" placeholder="代码 例: SPY / 1346" />
+      <input id="p-code" placeholder="代码 例: SPY / 1346 / 7203.T" />
       <input id="p-qty" type="number" placeholder="数量" />
       <input id="p-cost" type="number" placeholder="成本价(可空)" />
       <button id="p-add">添加</button>
@@ -87,11 +99,57 @@
       <div class="card-title">ℹ️ 关于</div>
       <div class="hint">
         数据来源：Yahoo Finance（每日由 GitHub 定时任务更新，约日本时间 08:00）。<br>
-        AI 解读由 Gemini 生成。所有内容仅供参考，<b>不构成投资建议</b>。投资有风险，决策请自行判断。
+        走势图为历史收盘价，虚线为 AI 预测区间（68% 置信）。<br>
+        所有内容仅供参考，<b>不构成投资建议</b>。投资有风险，决策请自行判断。
       </div>
     </div>
   </section>
 </main>
+
+<!-- 标的详情弹层 -->
+<div class="modal-mask" id="modal-mask" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="m-title">—</div>
+        <div class="modal-sub" id="m-sub">—</div>
+      </div>
+      <div class="modal-actions">
+        <button class="mini-btn" id="m-fav">☆ 收藏</button>
+        <button class="modal-close" id="m-close">✕</button>
+      </div>
+    </div>
+    <div class="modal-price">
+      <span class="price-big" id="m-price">—</span>
+      <span class="chg" id="m-chg">—</span>
+      <span class="risk-badge" id="m-risk">—</span>
+    </div>
+    <div class="range-btns" id="m-range">
+      <button class="rng active" data-r="1m">1M</button>
+      <button class="rng" data-r="3m">3M</button>
+      <button class="rng" data-r="6m">6M</button>
+      <button class="rng" data-r="1y">1Y</button>
+    </div>
+    <div class="chart-box" id="m-chart"></div>
+    <div class="m-section-title">🤖 AI 预测（未来 5 / 10 / 20 个交易日）</div>
+    <div class="pred-card" id="m-pred">
+      <div class="pred-row">
+        <div class="pred-cell"><div class="pred-label">方向</div><div class="pred-dir" id="m-dir">—</div></div>
+        <div class="pred-cell"><div class="pred-label">置信度</div><div id="m-conf">—</div></div>
+        <div class="pred-cell"><div class="pred-label">10日中枢</div><div id="m-center">—</div></div>
+      </div>
+      <div class="pred-row">
+        <div class="pred-cell"><div class="pred-label">支撑位</div><div id="m-support">—</div></div>
+        <div class="pred-cell"><div class="pred-label">压力位</div><div id="m-resistance">—</div></div>
+      </div>
+      <div class="pred-why" id="m-why">—</div>
+      <div class="pred-note" id="m-note">AI 预测为概率性判断，不构成投资建议。</div>
+    </div>
+    <div class="m-section-title">技术指标</div>
+    <div class="ind-grid" id="m-ind"></div>
+    <div class="pred-note">数据更新：<span id="m-updated">—</span></div>
+  </div>
+</div>
 
 <div class="status-bar" id="status-bar"></div>
 <script>
